@@ -25,7 +25,11 @@ with open(os.path.join(dir,'config.yaml'), 'r') as f:
 
 input_dict = config['input_dict']
 name_map = config['name_mapping']
-name_map_swap = {v: k for k, v in name_map.items()}
+# Ensure all keys in name_map are valid
+name_map_swap = {v: k for k, v in name_map.items() if k and v}
+# If name_map_swap is empty, create a default mapping
+if not name_map_swap:
+    name_map_swap = {k: k for k in name_map.keys()}
 variables = config['output_vars']
 inp_template = os.path.join(dir,'ann_inp.csv')
 
@@ -38,10 +42,11 @@ dfinps_global = dfinps.copy()
 dfinps_original = dfinps.copy()  # Keep original for reference
 dfouts = pd.read_csv('dsm2_hist_ec_output.csv',index_col=0, parse_dates = ['Time'])
 
-# Default values
-wateryear = 2014
-start_date = dt.datetime(wateryear-1, 10, 1)
-end_date = dt.datetime(wateryear, 9, 30)
+# Default values - Use EMMATON if available, otherwise first station
+DEFAULT_STATION = 'EMMATON' if 'EMMATON' in name_map else list(name_map.keys())[0]
+DEFAULT_WATERYEAR = 2014
+start_date = dt.datetime(DEFAULT_WATERYEAR-1, 10, 1)
+end_date = dt.datetime(DEFAULT_WATERYEAR, 9, 30)
 
 scale_df1 = pd.read_csv(os.path.join(dir,'input_scale.csv'),
                         index_col=0, parse_dates = ['month'])
@@ -54,7 +59,8 @@ COMPUTING_LOCK = threading.Lock()
 COMPUTATION_STATUS = {}
 ALL_MODELS = ['Res-LSTM', 'Res-GRU', 'LSTM', 'GRU', 'ResNet']
 CURRENT_INPUT_HASH = None
-AUTO_RECOMPUTE = True  # Flag to control automatic recomputation
+IS_COMPUTING = False
+COMPUTATION_THREADS = {}  # Track running threads
 
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
@@ -109,7 +115,7 @@ def precompute_single_model(station, dfinp, dfouts, model, start_date, end_date)
 
 def precompute_all_models(station, dfinp, dfouts, wateryear, progress_bar=None, force=False):
     """Pre-compute results for all models for a given station and water year"""
-    global CURRENT_INPUT_HASH
+    global CURRENT_INPUT_HASH, IS_COMPUTING
     
     start_date = dt.datetime(int(wateryear)-1, 10, 1)
     end_date = dt.datetime(int(wateryear), 9, 30)
@@ -121,26 +127,33 @@ def precompute_all_models(station, dfinp, dfouts, wateryear, progress_bar=None, 
     # Update current input hash
     CURRENT_INPUT_HASH = input_hash
     
-    # Check if already computed in memory with same inputs
+    # Check if already computed in memory with same inputs - FAST PATH
     if not force and cache_key in PRECOMPUTED_RESULTS:
-        print(f"Using cached results for {station} WY{wateryear}")
+        print(f"Using in-memory cached results for {station} WY{wateryear}")
+        IS_COMPUTING = False
         return PRECOMPUTED_RESULTS[cache_key]
     
-    # Try to load from disk
+    # Try to load from disk - SECOND FAST PATH
     if not force:
         cached = load_cached_results(station, wateryear, input_hash)
         if cached:
             PRECOMPUTED_RESULTS[cache_key] = cached
+            print(f"Loaded from disk cache for {station} WY{wateryear}")
+            IS_COMPUTING = False
             return cached
     
+    # Only compute if necessary
+    IS_COMPUTING = True
     print(f"Pre-computing all models for {station} WY{wateryear}...")
     results = {}
     
     # Update status
     COMPUTATION_STATUS[cache_key] = "Computing..."
     
-    # Use parallel processing for faster computation
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    # Use parallel processing with optimal worker count
+    max_workers = min(5, len(ALL_MODELS))
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         for model in ALL_MODELS:
             future = executor.submit(precompute_single_model, 
@@ -148,24 +161,32 @@ def precompute_all_models(station, dfinp, dfouts, wateryear, progress_bar=None, 
                                    start_date, end_date)
             futures.append(future)
         
-        # Collect results
+        # Collect results and update display immediately
         for i, future in enumerate(as_completed(futures)):
             model, result = future.result()
             results[model] = result
+            
+            # Store partial results immediately for display
+            PRECOMPUTED_RESULTS[cache_key] = results
+            
             if progress_bar:
                 progress_bar.value = int((i + 1) / len(ALL_MODELS) * 100)
     
-    # Store in memory and disk
-    PRECOMPUTED_RESULTS[cache_key] = results
-    save_cached_results(station, wateryear, input_hash, results)
+    # Save to disk after all models complete (non-blocking)
+    def save_async():
+        save_cached_results(station, wateryear, input_hash, results)
     
-    # Clear old cached results with different input hashes
-    old_keys = [k for k in PRECOMPUTED_RESULTS.keys() 
-                if k.startswith(f"{station}_{wateryear}") and k != cache_key]
-    for k in old_keys:
-        del PRECOMPUTED_RESULTS[k]
+    save_thread = threading.Thread(target=save_async)
+    save_thread.daemon = True
+    save_thread.start()
+    
+    # Keep memory cache size reasonable
+    if len(PRECOMPUTED_RESULTS) > 10:
+        oldest_key = list(PRECOMPUTED_RESULTS.keys())[0]
+        del PRECOMPUTED_RESULTS[oldest_key]
     
     COMPUTATION_STATUS[cache_key] = "Ready"
+    IS_COMPUTING = False
     print(f"Completed pre-computation for {station} WY{wateryear}")
     
     return results
@@ -222,7 +243,7 @@ def scale_inputs(inp_template, input_loc, scale_df, fs1, fs2, fs3,
     scale_values = [fs1, fs2, fs3, fs4, fs5, fs6, fs7, fs8, fs9, fs10, fs11, fs12]
     scale_df.loc[1:12, input_loc] = scale_values
     
-    # IMPORTANT FIX: Apply ALL scalings from scale_df to create complete scaled dataset
+    # Apply ALL scalings from scale_df to create complete scaled dataset
     dfinps_global = dfinps.copy()  # Start fresh from original
     
     mask = (dfinps_global.index > sd) & (dfinps_global.index < ed)
@@ -238,16 +259,6 @@ def scale_inputs(inp_template, input_loc, scale_df, fs1, fs2, fs3,
     inputdf = dfinps_global.loc[(dfinps_global.index > sd) & 
                                 (dfinps_global.index <= ed)]
     inputdf.to_csv('ann_inputs.csv')
-    
-    # Check if inputs have changed
-    new_hash = get_input_hash(dfinps_global, sd, ed)
-    if new_hash != CURRENT_INPUT_HASH:
-        print(f"Inputs changed for {input_loc}, triggering recomputation...")
-        CURRENT_INPUT_HASH = new_hash
-        
-        # Trigger recomputation if auto-recompute is enabled
-        if AUTO_RECOMPUTE and hasattr(scale_inputs, 'current_station') and hasattr(scale_inputs, 'current_wy'):
-            trigger_recomputation(scale_inputs.current_station, scale_inputs.current_wy)
     
     return dfinps_global
 
@@ -277,9 +288,9 @@ def make_input_plot(inp_template, dfinp, input_loc, start_date, end_date, refres
            line_dash='solid', line_width=1, line_alpha=0.5,
            legend_label=f'{input_loc} (historical)')
     
-    # Styling
-    p.plot_height = 415
-    p.plot_width = 700
+    # Styling - larger for better display
+    p.plot_height = 350  # Increased from 300
+    p.plot_width = 600   # Increased from 550
     p.x_range = Range1d(start=start_date, end=end_date)
     p.xaxis.ticker.desired_num_ticks = 12
     p.y_range = Range1d(y_min, y_max)
@@ -287,16 +298,16 @@ def make_input_plot(inp_template, dfinp, input_loc, start_date, end_date, refres
     
     # Add labels
     for d in date_list:
-        lbl_scaled = Label(x=d, y=290, x_units='data', y_units='screen',
+        lbl_scaled = Label(x=d, y=240, x_units='data', y_units='screen',
                           text=str(round(dfinp_window_avg[input_loc][d.month])),
                           text_font_size='8pt', text_color='blue', x_offset=10)
-        lbl_hist = Label(x=d, y=275, x_units='data', y_units='screen',
+        lbl_hist = Label(x=d, y=225, x_units='data', y_units='screen',
                         text=str(round(hist_window_avg[input_loc][d.month])),
                         text_font_size='8pt', text_color='silver', x_offset=10)
         p.add_layout(lbl_scaled)
         p.add_layout(lbl_hist)
     
-    annot_1 = Label(x=start_date, y=305, x_units='data', y_units='screen',
+    annot_1 = Label(x=start_date, y=255, x_units='data', y_units='screen',
                     text='Monthly Average (cfs):',
                     text_font_size='10pt', text_color='black', x_offset=10)
     p.add_layout(annot_1)
@@ -312,8 +323,10 @@ def make_input_plot(inp_template, dfinp, input_loc, start_date, end_date, refres
     return p
 
 def make_ts_plot_ANN_fast(selected_key_stations, wateryear, model_kind, 
-                         overlay_obs=False, computation_status="", _refresh=0):
+                         overlay_obs=False, _refresh=0):
     """Fast plotting using pre-computed results"""
+    
+    global IS_COMPUTING
     
     colors = itertools.cycle(palette)
     start_date = dt.datetime(int(wateryear)-1, 10, 1)
@@ -323,11 +336,28 @@ def make_ts_plot_ANN_fast(selected_key_stations, wateryear, model_kind,
     input_hash = get_input_hash(dfinps_global, start_date, end_date)
     cache_key = f"{selected_key_stations}_{wateryear}_{input_hash}"
     
-    title_text = f'{name_map[selected_key_stations]} ({selected_key_stations})'
-    if computation_status:
-        title_text += f' - {computation_status}'
+    # Build title - check if station is in name_map
+    if selected_key_stations in name_map:
+        title_text = f'{name_map[selected_key_stations]} ({selected_key_stations})'
+    else:
+        title_text = f'{selected_key_stations}'
     
     p = figure(title=title_text, x_axis_type='datetime')
+    
+    # Simple computing indicator without animation
+    if IS_COMPUTING:
+        computing_label = Label(
+            x=start_date + (end_date - start_date) / 2,
+            y=500,
+            x_units='data',
+            y_units='data',
+            text='Computing...',
+            text_font_size='20pt',
+            text_color='#3498db',
+            text_align='center',
+            text_baseline='middle'
+        )
+        p.add_layout(computing_label)
     
     outputdf = pd.DataFrame()
     historical_plotted = False
@@ -351,11 +381,19 @@ def make_ts_plot_ANN_fast(selected_key_stations, wateryear, model_kind,
                     p.line(pred_df.index, pred_df[selected_key_stations].values,
                            line_color=next(colors), line_width=1, legend_label=m)
                     outputdf[f'{selected_key_stations}_{m}'] = pred_df[selected_key_stations]
-    else:
-        # Show message if not ready
-        p.add_layout(Label(x=start_date, y=0, 
-                          text="Models need recomputation. Click 'Compute' or wait for auto-computation.",
-                          text_font_size='12pt', text_color='red'))
+    elif not IS_COMPUTING:
+        # Show message if not ready and not computing
+        message_label = Label(
+            x=start_date + (end_date - start_date) / 3,
+            y=500,
+            x_units='data',
+            y_units='data',
+            text="Click 'Compute' to generate results",
+            text_font_size='14pt',
+            text_color='#e74c3c',
+            text_align='center'
+        )
+        p.add_layout(message_label)
     
     if not outputdf.empty:
         outputdf.to_csv('ann_outputs.csv')
@@ -369,9 +407,9 @@ def make_ts_plot_ANN_fast(selected_key_stations, wateryear, model_kind,
                    line_color='red', line_width=1, line_alpha=0.75,
                    line_dash='dashed', legend_label='Historical (Observed)')
     
-    # Styling
-    p.plot_height = 500
-    p.plot_width = 900
+    # Styling - larger for better display
+    p.plot_height = 400  
+    p.plot_width = 1200   # Increased width for full display
     p.legend.location = 'top_left'
     p.yaxis.axis_label = 'EC (uS/cm)'
     p.xaxis.axis_label = 'Date'
@@ -385,134 +423,150 @@ def make_ts_plot_ANN_fast(selected_key_stations, wateryear, model_kind,
     
     return p
 
-def trigger_recomputation(station, wateryear):
-    """Trigger background pre-computation with current inputs"""
-    def compute():
-        precompute_all_models(station, dfinps_global, dfouts, wateryear, force=True)
-        # Update the plot after computation
-        if hasattr(trigger_recomputation, 'refresh_callback'):
-            trigger_recomputation.refresh_callback()
+def compute_current_thread(station, wy, progress_bar, status_text, refresh_btn):
+    """Computation function to run in thread"""
+    global IS_COMPUTING
     
-    thread = threading.Thread(target=compute)
-    thread.daemon = True
-    thread.start()
+    try:
+        IS_COMPUTING = True
+        progress_bar.visible = True
+        progress_bar.value = 0
+        
+        # Check if already cached first
+        start_date = dt.datetime(int(wy)-1, 10, 1)
+        end_date = dt.datetime(int(wy), 9, 30)
+        input_hash = get_input_hash(dfinps_global, start_date, end_date)
+        cache_key = f"{station}_{wy}_{input_hash}"
+        
+        if cache_key in PRECOMPUTED_RESULTS:
+            status_text.object = "**✓ Results already cached!**"
+            IS_COMPUTING = False
+            progress_bar.visible = False
+            refresh_btn.clicks += 1
+            return
+        
+        status_text.object = "**Computing models...**"
+        
+        # Run computation with immediate updates
+        precompute_all_models(station, dfinps_global, dfouts, wy, progress_bar, force=True)
+        
+        # Refresh display immediately after computation
+        refresh_btn.clicks += 1
+        
+        IS_COMPUTING = False
+        progress_bar.visible = False
+        status_text.object = "**✓ Computation complete!**"
+        
+    except Exception as e:
+        IS_COMPUTING = False
+        progress_bar.visible = False
+        status_text.object = f"**❌ Error: {str(e)}**"
+        refresh_btn.clicks += 1
 
-def listener(e1, e2, e3, e4, e5, e6):
-    """Listener to detect when inputs change"""
-    # This will be called when any input changes
-    return None
+# Initialize widgets early
+refresh_btn = pn.widgets.Button(name='Refresh', button_type='default', width=50, visible=False)
 
-# Initialize first station and year for pre-computation
-initial_station = list(name_map.keys())[0]
-initial_wy = '2014'
+# Initialize first station and year
+initial_station = DEFAULT_STATION
+initial_wy = str(DEFAULT_WATERYEAR)
 
-# Widgets
-variables_w = pn.widgets.Select(name='Output Location', value=initial_station, 
-                                options=name_map_swap)
-model_kind_w = pn.widgets.CheckBoxGroup(
-    name='ML Model Selection', value=['Res-LSTM'],
-    options=ALL_MODELS,
-    inline=True)
-
-overlay_obs_w = pn.widgets.Checkbox(name='Overlay Observed Data', value=True)
-
+# Widgets with new order
 yearselect_w = pn.widgets.RadioButtonGroup(
-    name='WY Selector',
+    name='',  # Removed label since we have title above
     options=['1991', '1992', '1993', '1994', '1995', '1996', '1997', '1998',
              '1999', '2000', '2001', '2002', '2003', '2004', '2005', '2006',
              '2007', '2008', '2009', '2010', '2011', '2012', '2013', '2014',
              '2015', '2016', '2017', '2018', '2019', '2020', '2021'],
     value=initial_wy,
-    button_type='primary')
+    button_type='primary'
+)
+
+variables_w = pn.widgets.Select(
+    name='',  # Removed label since we have title above
+    value=initial_station, 
+    options=name_map_swap,
+    width=200,
+    margin=(10, 10, 10, 10)
+)
+
+model_kind_w = pn.widgets.CheckBoxGroup(
+    name='ML Model Selection', 
+    value=ALL_MODELS,  # All models selected by default
+    options=ALL_MODELS,
+    inline=True
+)
+
+overlay_obs_w = pn.widgets.Checkbox(name='Overlay Observed Data', value=True)
 
 # Progress and status indicators
 progress_bar = pn.indicators.Progress(
-    name='Computing models...', value=0, max=100, width=300, visible=False)
-status_text = pn.pane.Markdown("**Ready**", width=300)
+    name='Computing models...', value=0, max=100, width=180, visible=False
+)
+status_text = pn.pane.Markdown("**Ready**", width=180)
 
-# Auto-recompute toggle
-auto_recompute_w = pn.widgets.Checkbox(
-    name='Auto-recompute on input change', value=True)
-
-def update_auto_recompute(event):
-    global AUTO_RECOMPUTE
-    AUTO_RECOMPUTE = event.new
-
-auto_recompute_w.param.watch(update_auto_recompute, 'value')
-
-# Buttons
-compute_btn = pn.widgets.Button(name='Compute', button_type='success')
-clear_cache_btn = pn.widgets.Button(name='Clear Cache', button_type='warning')
-refresh_btn = pn.widgets.Button(name='Refresh Plot', button_type='default', width=50)
+# Compute button
+compute_btn = pn.widgets.Button(
+    name='Compute', 
+    button_type='success', 
+    width=180, 
+    height=40,
+    margin=(10, 10, 10, 10)
+)
 
 def compute_current(event):
     """Compute for current selection and inputs"""
-    progress_bar.visible = True
-    progress_bar.value = 0
-    status_text.object = "**Computing all models with current inputs...**"
+    global IS_COMPUTING, COMPUTATION_THREADS
+    
+    if IS_COMPUTING:
+        status_text.object = "**⚠ Already computing, please wait...**"
+        return
     
     station = variables_w.value
     wy = yearselect_w.value
     
-    # Store current settings
-    scale_inputs.current_station = station
-    scale_inputs.current_wy = wy
+    # Cancel any existing computation thread
+    thread_key = f"{station}_{wy}"
+    if thread_key in COMPUTATION_THREADS and COMPUTATION_THREADS[thread_key].is_alive():
+        status_text.object = "**⚠ Previous computation still running...**"
+        return
     
-    # Run computation with current scaled inputs
-    precompute_all_models(station, dfinps_global, dfouts, wy, progress_bar, force=True)
-    
-    progress_bar.visible = False
-    status_text.object = "**✓ Computation complete!**"
-    
-    # FIXED: Force the plot to refresh by incrementing refresh button clicks
-    refresh_btn.clicks += 1
-
-def clear_cache_callback(event):
-    """Clear all cached results"""
-    global PRECOMPUTED_RESULTS, CURRENT_INPUT_HASH
-    PRECOMPUTED_RESULTS.clear()
-    CURRENT_INPUT_HASH = None
-    
-    # Clear disk cache
-    if os.path.exists(CACHE_DIR):
-        for file in os.listdir(CACHE_DIR):
-            if file.endswith('.pkl'):
-                os.remove(os.path.join(CACHE_DIR, file))
-    
-    status_text.object = "**Cache cleared! All saved results have been deleted.**"
+    # Start computation in thread
+    thread = threading.Thread(
+        target=compute_current_thread,
+        args=(station, wy, progress_bar, status_text, refresh_btn)
+    )
+    thread.daemon = True
+    thread.start()
+    COMPUTATION_THREADS[thread_key] = thread
 
 compute_btn.on_click(compute_current)
-clear_cache_btn.on_click(clear_cache_callback)
-
-# Set up refresh callback for background computation
-def refresh_callback():
-    refresh_btn.clicks += 1
-    status_text.object = "**✓ Auto-computation complete!**"
-
-trigger_recomputation.refresh_callback = refresh_callback
 
 # File download/upload widgets
-output_download = pn.widgets.FileDownload(file='ann_outputs.csv',
-                                          filename='ann_outputs.csv',
-                                          label='Download ANN Output Data')
-input_download = pn.widgets.FileDownload(file='ann_inputs.csv',
-                                         filename='ann_inputs.csv',
-                                         label='Download ANN Input Data')
+output_download = pn.widgets.FileDownload(
+    file='ann_outputs.csv',
+    filename='ann_outputs.csv',
+    label='Download ANN Output Data'
+)
+input_download = pn.widgets.FileDownload(
+    file='ann_inputs.csv',
+    filename='ann_inputs.csv',
+    label='Download ANN Input Data'
+)
 input_upload = pn.widgets.FileInput(accept='.csv')
 
 # Title and info panes
 title_pane = pn.pane.Markdown('''
-## DSM2 Emulator Dashboard (Optimized)
-A browser-based Delta Salinity Dashboard which serves 
-as the front-end user interface for the DSM2 salinity emulation machine learning models 
-co-developed by the California Department of Water Resources and University of California, Davis.
+## DSM2 Salinity Emulator Dashboard
+A browser-based Delta Salinity Dashboard 
+as the front-end user interface for the DSM2 salinity emulation machine learning models.
 
 **Usage:** 
-1. Adjust input scalers on the left
-2. Click "Compute" or wait for auto-computation
-3. Select models to display on the right
+1. Select Water Year
+2. Modify input scales (Optional)
+3. Select Location
+4. Click "Compute" to generate results
 
-**Cache System:** Results are saved to speed up repeated calculations. Use "Clear Cache" to remove all saved results.
+**Note:** Results are cached automatically for faster access.
 ''', background='white')
 
 assumptions_pane = pn.pane.Markdown('''
@@ -522,40 +576,27 @@ Zhou, Y.; Hoang, R.; Tom, B.; Anderson, J.; Roh, D.M.
 Novel Salinity Modeling Using Deep Learning for the Sacramento—San
 Joaquin Delta of California. Water 2022, 14, 3628. 
 [https://doi.org/10.3390/w14223628](https://doi.org/10.3390/w14223628)  
+
+Qi, S.; He, M.; Bai, Z.; Ding, Z.; Sandhu, P.; Zhou, Y.; Namadi, P.; 
+Tom, B.; Hoang, R.; Anderson, J.
+Multi-Location Emulation of a Process-Based Salinity Model Using Machine Learning. Water 2022, 14, 2030. 
+[https://doi.org/10.3390/w14132030](https://doi.org/10.3390/w14132030)  
+
+Qi, S.; He, M.; Hoang, R.; Zhou, Y.; Namadi, P.; Tom, B.;
+Sandhu, P.; Bai, Z.; Chung, F.; Ding, Z.; et al. 
+Salinity Modeling Using Deep Learning with Data Augmentation and Transfer Learning. Water 2023, 15, 2482. 
+[https://doi.org/10.3390/w15132482](https://doi.org/10.3390/w15132482) 
 ''')
 
 feedback_pane = pn.pane.Markdown('''
 #### Disclaimer: this dashboard is still in beta.  
-Thank you for evaluating the DSM2 Emulator Dashboard. Your feedback and suggestions are welcome. 
-[Leave Feedback](https://forms.gle/C6ysGxvxwqK1XY54A)  
+Thank you for evaluating the DSM2 Emulator Dashboard. Your feedback and suggestions are welcome.  
 If you have questions, please contact Kevin He (Kevin.He@Water.ca.gov)
 ''', background='white')
 
 # Bindings
 sd_bnd = pn.bind(make_sd, wateryear=yearselect_w)
 ed_bnd = pn.bind(make_ed, wateryear=yearselect_w)
-
-# Store current station and year for scale_inputs
-scale_inputs.current_station = initial_station
-scale_inputs.current_wy = initial_wy
-
-# When station or year changes, update stored values and trigger computation
-def on_station_change(event):
-    scale_inputs.current_station = event.new
-    scale_inputs.current_wy = yearselect_w.value
-    if AUTO_RECOMPUTE:
-        status_text.object = "**Auto-computing for new station...**"
-        trigger_recomputation(event.new, yearselect_w.value)
-
-def on_year_change(event):
-    scale_inputs.current_station = variables_w.value
-    scale_inputs.current_wy = event.new
-    if AUTO_RECOMPUTE:
-        status_text.object = "**Auto-computing for new year...**"
-        trigger_recomputation(variables_w.value, event.new)
-
-variables_w.param.watch(on_station_change, 'value')
-yearselect_w.param.watch(on_year_change, 'value')
 
 # Initialize slider groups
 northern_flow = SliderGroup('northern_flow')
@@ -588,49 +629,26 @@ scale_sac_greens_ec = pn.bind(scale_inputs, scale_df=scale_df,
                               sd=sd_bnd, ed=ed_bnd,
                               **sac_greens_ec.kwargs)
 
-listener_bnd = pn.bind(listener,
-                       e1=scale_northern_flow,
-                       e2=scale_exp,
-                       e3=scale_sjr_flow,
-                       e4=None,
-                       e5=scale_sjr_vernalis_ec,
-                       e6=scale_sac_greens_ec)
-
-# Get computation status
-def get_status():
-    start_date = dt.datetime(int(yearselect_w.value)-1, 10, 1)
-    end_date = dt.datetime(int(yearselect_w.value), 9, 30)
-    input_hash = get_input_hash(dfinps_global, start_date, end_date)
-    cache_key = f"{variables_w.value}_{yearselect_w.value}_{input_hash}"
-    
-    if cache_key in PRECOMPUTED_RESULTS:
-        return "Ready"
-    return COMPUTATION_STATUS.get(cache_key, "Needs computation")
-
 # Dashboard Layout
 pn.extension(loading_spinner='dots', loading_color='silver', throttled=True)
 pn.param.ParamMethod.loading_indicator = True
 
-# Main dashboard
+# Main dashboard - Single page layout with new workflow order
 dash = pn.Column(
     title_pane,
+    # Top row - Year selection with title
     pn.Row(
         pn.Column(
-            pn.pane.Markdown('### Model Controls'),
-            compute_btn,
-            auto_recompute_w,
-            clear_cache_btn,
-            progress_bar,
-            status_text,
-        ),
-        pn.Column(
-            pn.pane.Markdown('### Simulation Period (WY)'),
+            pn.pane.Markdown('### 1. Select Water Year'),  # Added title for step 1
             yearselect_w,
+            width=1400
         )
     ),
+    # Second section - Input scales and controls
     pn.Row(
+        # Left column - Input scales
         pn.Column(
-            pn.pane.Markdown('### ANN Inputs - Input Scaler'),
+            pn.pane.Markdown('### 2. Input Scaler (Optional)'),  # Removed ANN, kept consistent style
             pn.Tabs(
                 ("Northern Flow",
                  pn.Column(
@@ -667,40 +685,75 @@ dash = pn.Column(
                             dfinp=scale_sac_greens_ec, input_loc='sac_greens_ec',
                             start_date=sd_bnd, end_date=ed_bnd, refresh=refresh_btn))),
             ),
+            width=650  # Increased width to accommodate larger plot
         ),
-        
+        # Middle column - Location and Compute
         pn.Column(
-            pn.pane.Markdown('### ANN Outputs'),
+            pn.pane.Markdown('### 3. Select Location'),  # Added consistent title for step 3
+            variables_w,
+            pn.Spacer(height=20),
+            pn.pane.Markdown('### 4. Click "Compute" to generate results'),  # Added title for step 4
+            compute_btn,
+            progress_bar,
+            status_text,
+            width=300,
+            margin=(0, 0, 0, 120)  # Adjusted margin
+        ),
+        # Right column - empty space
+        pn.Spacer(width=330)
+    ),
+    # Add more vertical space before outputs
+    pn.Spacer(height=70),  # Increased from 50px to 70px to move graphs down more
+    # Third section - Output graphs (moved further down)
+    pn.Row(
+        pn.Spacer(width=50),  # Left margin
+        pn.Column(
+            pn.pane.Markdown('### Outputs'),  # Removed ANN from title
             pn.Tabs(
                 ('Plots',
                  pn.Column(
-                     variables_w,
                      pn.bind(make_ts_plot_ANN_fast,
                             selected_key_stations=variables_w,
                             wateryear=yearselect_w,
                             model_kind=model_kind_w,
                             overlay_obs=overlay_obs_w,
-                            computation_status=get_status,
-                            _refresh=refresh_btn.param.clicks),  # FIXED: Added refresh trigger
+                            _refresh=refresh_btn.param.clicks),
                      model_kind_w,
                      overlay_obs_w,
-                     pn.Row(input_download, output_download, refresh_btn)
+                     pn.Row(input_download, output_download)
                  )),
-            )
+            ),
+            width=1300
         )
     ),
     assumptions_pane,
-    feedback_pane,
+    feedback_pane
 )
 
-# Start initial pre-computation
-print("Starting initial pre-computation...")
-trigger_recomputation(initial_station, initial_wy)
+# Pre-load default station results on startup
+print(f"Pre-loading {DEFAULT_STATION} {DEFAULT_WATERYEAR} results...")
 
-dash.servable(title="DSM2 ANN Emulator Dashboard")
+# Try to load from cache first
+initial_results = load_cached_results(DEFAULT_STATION, DEFAULT_WATERYEAR, 
+                                     get_input_hash(dfinps_global, 
+                                                   dt.datetime(DEFAULT_WATERYEAR-1, 10, 1),
+                                                   dt.datetime(DEFAULT_WATERYEAR, 9, 30)))
+if initial_results:
+    cache_key = f"{DEFAULT_STATION}_{DEFAULT_WATERYEAR}_{get_input_hash(dfinps_global, dt.datetime(DEFAULT_WATERYEAR-1, 10, 1), dt.datetime(DEFAULT_WATERYEAR, 9, 30))}"
+    PRECOMPUTED_RESULTS[cache_key] = initial_results
+    print(f"✓ {DEFAULT_STATION} {DEFAULT_WATERYEAR} loaded from cache - ready for instant display!")
+else:
+    print(f"Computing {DEFAULT_STATION} {DEFAULT_WATERYEAR} for first time...")
+    # Compute in background to not block startup
+    def initial_compute():
+        precompute_all_models(DEFAULT_STATION, dfinps_global, dfouts, str(DEFAULT_WATERYEAR))
+        print(f"✓ {DEFAULT_STATION} {DEFAULT_WATERYEAR} initial computation complete!")
+    
+    init_thread = threading.Thread(target=initial_compute)
+    init_thread.daemon = True
+    init_thread.start()
+
+dash.servable(title="DSM2 Salinity Emulator Dashboard")
 
 if __name__ == '__main__':
-    # Pre-compute for initial selection on startup
-    print("Pre-computing initial models...")
-    precompute_all_models(initial_station, dfinps_global, dfouts, initial_wy)
-    dash.show(title="DSM2 ANN Emulator Dashboard")
+    dash.show(title="DSM2 Salinity Emulator Dashboard")

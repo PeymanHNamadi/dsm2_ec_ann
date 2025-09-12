@@ -284,8 +284,9 @@ def make_input_plot(inp_template, dfinp, input_loc, start_date, end_date, refres
     p = figure(title="", x_axis_type='datetime')
     p.line(source=dfinp, x='Time', y=str(input_loc), line_color='blue',
            line_dash='solid', line_width=1.5, legend_label=f'{input_loc} (scaled)')
-    p.line(source=dfinps_original, x='Time', y=str(input_loc), line_color='silver',
-           line_dash='solid', line_width=1, line_alpha=0.5,
+    # FIXED: Changed historical line to black with full opacity
+    p.line(source=dfinps_original, x='Time', y=str(input_loc), line_color='#000000',  # Pure black
+           line_dash='solid', line_width=1.2, line_alpha=1.0,  # Full opacity, slightly thicker
            legend_label=f'{input_loc} (historical)')
     
     # Styling - larger for better display with increased font sizes
@@ -309,14 +310,14 @@ def make_input_plot(inp_template, dfinp, input_loc, start_date, end_date, refres
     # Increase legend font size
     p.legend.label_text_font_size = "12pt"
     
-    # Add labels
+    # Add labels - CHANGED COLOR FROM SILVER TO BLACK FOR HISTORICAL VALUES
     for d in date_list:
         lbl_scaled = Label(x=d, y=240, x_units='data', y_units='screen',
                           text=str(round(dfinp_window_avg[input_loc][d.month])),
                           text_font_size='8pt', text_color='blue', x_offset=10)
         lbl_hist = Label(x=d, y=225, x_units='data', y_units='screen',
                         text=str(round(hist_window_avg[input_loc][d.month])),
-                        text_font_size='8pt', text_color='silver', x_offset=10)
+                        text_font_size='8pt', text_color='black', x_offset=10)  # CHANGED FROM 'silver' TO 'black'
         p.add_layout(lbl_scaled)
         p.add_layout(lbl_hist)
     
@@ -424,7 +425,7 @@ def make_ts_plot_ANN_fast(selected_key_stations, wateryear, model_kind,
     # Styling - larger for better display with increased font sizes
     p.plot_height = 450  # Increased to accommodate rotated labels
     p.plot_width = 1200   # Increased width for full display
-    p.legend.location = 'top_left'
+    p.legend.location = 'top_right'  # CHANGED from top_left to top_right
     
     # Increase axis label font sizes
     p.yaxis.axis_label = 'EC (uS/cm)'
@@ -498,7 +499,7 @@ refresh_btn = pn.widgets.Button(name='Refresh', button_type='default', width=50,
 initial_station = DEFAULT_STATION
 initial_wy = str(DEFAULT_WATERYEAR)
 
-# Widgets with new order
+# Widgets with new order - INCREASED FONT SIZE FOR YEAR BUTTONS
 yearselect_w = pn.widgets.RadioButtonGroup(
     name='',  # Removed label since we have title above
     options=['1991', '1992', '1993', '1994', '1995', '1996', '1997', '1998',
@@ -506,7 +507,13 @@ yearselect_w = pn.widgets.RadioButtonGroup(
              '2007', '2008', '2009', '2010', '2011', '2012', '2013', '2014',
              '2015', '2016', '2017', '2018', '2019', '2020', '2021'],
     value=initial_wy,
-    button_type='primary'
+    button_type='primary',
+    stylesheets=["""
+    .bk-btn-group .bk-btn {
+        font-size: 16px !important;
+        padding: 8px 12px !important;
+    }
+    """]
 )
 
 variables_w = pn.widgets.Select(
@@ -517,14 +524,31 @@ variables_w = pn.widgets.Select(
     margin=(10, 10, 10, 10)
 )
 
+# MODEL SELECTION WIDGET WITH INCREASED FONT SIZE
 model_kind_w = pn.widgets.CheckBoxGroup(
     name='ML Model Selection', 
     value=ALL_MODELS,  # All models selected by default
     options=ALL_MODELS,
-    inline=True
+    inline=True,
+    stylesheets=["""
+    :host {
+        --bokeh-base-font-size: 16px !important;
+    }
+    .bk-input-group label {
+        font-size: 16px !important;
+    }
+    """]
 )
 
-overlay_obs_w = pn.widgets.Checkbox(name='Overlay Observed Data', value=True)
+overlay_obs_w = pn.widgets.Checkbox(
+    name='Overlay Observed Data', 
+    value=True,
+    stylesheets=["""
+    :host {
+        --bokeh-base-font-size: 16px !important;
+    }
+    """]
+)
 
 # Progress and status indicators
 progress_bar = pn.indicators.Progress(
@@ -532,13 +556,19 @@ progress_bar = pn.indicators.Progress(
 )
 status_text = pn.pane.Markdown("**Ready**", width=180)
 
-# Compute button
+# Compute button with LARGER FONT SIZE
 compute_btn = pn.widgets.Button(
     name='Compute', 
     button_type='success', 
     width=180, 
-    height=40,
-    margin=(10, 10, 10, 10)
+    height=50,  # Increased height
+    margin=(10, 10, 10, 10),
+    stylesheets=["""
+    .bk-btn {
+        font-size: 24px !important;
+        font-weight: bold !important;
+    }
+    """]
 )
 
 def compute_current(event):
@@ -569,16 +599,32 @@ def compute_current(event):
 
 compute_btn.on_click(compute_current)
 
-# File download/upload widgets - CHANGED LABELS HERE
+# File download/upload widgets with LARGER FONT SIZE
 output_download = pn.widgets.FileDownload(
     file='ann_outputs.csv',
     filename='ann_outputs.csv',
-    label='Download Output Data'
+    label='Download Output Data',
+    button_type='primary',
+    height=50,  # Increased height
+    stylesheets=["""
+    .bk-btn {
+        font-size: 24px !important;
+        font-weight: bold !important;
+    }
+    """]
 )
 input_download = pn.widgets.FileDownload(
     file='ann_inputs.csv',
     filename='ann_inputs.csv',
-    label='Download Input Data'
+    label='Download Input Data',
+    button_type='primary',
+    height=50,  # Increased height
+    stylesheets=["""
+    .bk-btn {
+        font-size: 24px !important;
+        font-weight: bold !important;
+    }
+    """]
 )
 input_upload = pn.widgets.FileInput(accept='.csv')
 
@@ -664,19 +710,19 @@ pn.param.ParamMethod.loading_indicator = True
 # Main dashboard - Single page layout with new workflow order
 dash = pn.Column(
     title_pane,
-    # Top row - Year selection with title
+    # Top row - Year selection with title - INCREASED FONT SIZE
     pn.Row(
         pn.Column(
-            pn.pane.Markdown('### 1. Select Water Year'),  # Added title for step 1
+            pn.pane.Markdown('## 1. Select Water Year', styles={'font-size': '20px'}),  # Increased font size
             yearselect_w,
             width=1400
         )
     ),
     # Second section - Input scales and controls
     pn.Row(
-        # Left column - Input scales
+        # Left column - Input scales - REMOVED "Optional" and INCREASED FONT SIZE
         pn.Column(
-            pn.pane.Markdown('### 2. Input Scaler (Optional)'),  # Removed ANN, kept consistent style
+            pn.pane.Markdown('## 2. Input Scaler', styles={'font-size': '20px'}),  # Removed Optional, increased font
             pn.Tabs(
                 ("Northern Flow",
                  pn.Column(
@@ -715,12 +761,12 @@ dash = pn.Column(
             ),
             width=700  # Increased width to accommodate larger plot with larger fonts
         ),
-        # Middle column - Location and Compute
+        # Middle column - Location and Compute - INCREASED FONT SIZES
         pn.Column(
-            pn.pane.Markdown('### 3. Select Location'),  # Added consistent title for step 3
+            pn.pane.Markdown('## 3. Select Location', styles={'font-size': '20px'}),  # Increased font size
             variables_w,
             pn.Spacer(height=20),
-            pn.pane.Markdown('### 4. Click "Compute" to generate results'),  # Added title for step 4
+            pn.pane.Markdown('## 4. Click "Compute" to generate results', styles={'font-size': '20px'}),  # Increased font size
             compute_btn,
             progress_bar,
             status_text,
@@ -730,13 +776,13 @@ dash = pn.Column(
         # Right column - empty space
         pn.Spacer(width=280)  # Reduced from 330
     ),
-    # FIXED: Significantly increased vertical space before outputs to prevent overlap
-    pn.Spacer(height=150),  # Increased from 70px to 150px to ensure no overlap with Input Scaler tabs
-    # Third section - Output graphs (moved much further down)
+    # Reduced vertical space before outputs for closer graphs
+    pn.Spacer(height=40),  # Further reduced from 80px to 40px for minimal gap
+    # Third section - Output graphs (moved much further down) - INCREASED FONT SIZE FOR "Outputs"
     pn.Row(
         pn.Spacer(width=50),  # Left margin
         pn.Column(
-            pn.pane.Markdown('### Outputs'),  # Removed ANN from title
+            pn.pane.Markdown('## Outputs', styles={'font-size': '24px'}),  # Increased font size for Outputs title
             pn.Tabs(
                 ('Plots',
                  pn.Column(

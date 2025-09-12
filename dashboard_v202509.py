@@ -288,13 +288,26 @@ def make_input_plot(inp_template, dfinp, input_loc, start_date, end_date, refres
            line_dash='solid', line_width=1, line_alpha=0.5,
            legend_label=f'{input_loc} (historical)')
     
-    # Styling - larger for better display
-    p.plot_height = 350  # Increased from 300
-    p.plot_width = 600   # Increased from 550
+    # Styling - larger for better display with increased font sizes
+    p.plot_height = 480  # Increased to accommodate rotated labels
+    p.plot_width = 650   # Increased width
     p.x_range = Range1d(start=start_date, end=end_date)
     p.xaxis.ticker.desired_num_ticks = 12
     p.y_range = Range1d(y_min, y_max)
+    
+    # Increase axis label font sizes
     p.yaxis.axis_label = input_dict[input_loc]
+    p.yaxis.axis_label_text_font_size = "16pt"  # Doubled from default (~8pt)
+    p.xaxis.axis_label = "Date"
+    p.xaxis.axis_label_text_font_size = "16pt"  # Doubled from default
+    
+    # Increase tick label font sizes
+    p.yaxis.major_label_text_font_size = "14pt"  # Doubled from default (~7pt)
+    p.xaxis.major_label_text_font_size = "14pt"  # Doubled from default
+    p.xaxis.major_label_orientation = 45  # Rotate x-axis labels 45 degrees
+    
+    # Increase legend font size
+    p.legend.label_text_font_size = "12pt"
     
     # Add labels
     for d in date_list:
@@ -343,6 +356,7 @@ def make_ts_plot_ANN_fast(selected_key_stations, wateryear, model_kind,
         title_text = f'{selected_key_stations}'
     
     p = figure(title=title_text, x_axis_type='datetime')
+    p.title.text_font_size = "16pt"  # Increase title font size
     
     # Simple computing indicator without animation
     if IS_COMPUTING:
@@ -373,13 +387,13 @@ def make_ts_plot_ANN_fast(selected_key_stations, wateryear, model_kind,
                 # Plot historical only once
                 if not historical_plotted and not targ_df.empty:
                     p.line(targ_df.index, targ_df[selected_key_stations].values,
-                           line_color='black', line_width=1,
+                           line_color='black', line_width=1.5,
                            legend_label='Historical (DSM2 simulated)')
                     historical_plotted = True
                 
                 if not pred_df.empty:
                     p.line(pred_df.index, pred_df[selected_key_stations].values,
-                           line_color=next(colors), line_width=1, legend_label=m)
+                           line_color=next(colors), line_width=1.5, legend_label=m)
                     outputdf[f'{selected_key_stations}_{m}'] = pred_df[selected_key_stations]
     elif not IS_COMPUTING:
         # Show message if not ready and not computing
@@ -404,15 +418,29 @@ def make_ts_plot_ANN_fast(selected_key_stations, wateryear, model_kind,
                                  (dfobs.index <= end_date), selected_key_stations]
         if not obs_filtered.empty:
             p.line(obs_filtered.index, obs_filtered.values,
-                   line_color='red', line_width=1, line_alpha=0.75,
+                   line_color='red', line_width=1.5, line_alpha=0.75,
                    line_dash='dashed', legend_label='Historical (Observed)')
     
-    # Styling - larger for better display
-    p.plot_height = 400  
+    # Styling - larger for better display with increased font sizes
+    p.plot_height = 450  # Increased to accommodate rotated labels
     p.plot_width = 1200   # Increased width for full display
     p.legend.location = 'top_left'
+    
+    # Increase axis label font sizes
     p.yaxis.axis_label = 'EC (uS/cm)'
+    p.yaxis.axis_label_text_font_size = "16pt"  # Doubled from default
     p.xaxis.axis_label = 'Date'
+    p.xaxis.axis_label_text_font_size = "16pt"  # Doubled from default
+    
+    # Increase tick label font sizes
+    p.yaxis.major_label_text_font_size = "14pt"  # Doubled from default
+    p.xaxis.major_label_text_font_size = "14pt"  # Doubled from default
+    p.xaxis.major_label_orientation = 45  # Rotate x-axis labels 45 degrees
+    
+    # Increase legend font size for model names
+    p.legend.label_text_font_size = "14pt"  # Increased for better visibility
+    p.legend.background_fill_alpha = 0.8
+    
     p.x_range = Range1d(start=start_date, end=end_date)
     
     # Tools
@@ -541,16 +569,16 @@ def compute_current(event):
 
 compute_btn.on_click(compute_current)
 
-# File download/upload widgets
+# File download/upload widgets - CHANGED LABELS HERE
 output_download = pn.widgets.FileDownload(
     file='ann_outputs.csv',
     filename='ann_outputs.csv',
-    label='Download ANN Output Data'
+    label='Download Output Data'
 )
 input_download = pn.widgets.FileDownload(
     file='ann_inputs.csv',
     filename='ann_inputs.csv',
-    label='Download ANN Input Data'
+    label='Download Input Data'
 )
 input_upload = pn.widgets.FileInput(accept='.csv')
 
@@ -685,7 +713,7 @@ dash = pn.Column(
                             dfinp=scale_sac_greens_ec, input_loc='sac_greens_ec',
                             start_date=sd_bnd, end_date=ed_bnd, refresh=refresh_btn))),
             ),
-            width=650  # Increased width to accommodate larger plot
+            width=700  # Increased width to accommodate larger plot with larger fonts
         ),
         # Middle column - Location and Compute
         pn.Column(
@@ -700,11 +728,11 @@ dash = pn.Column(
             margin=(0, 0, 0, 120)  # Adjusted margin
         ),
         # Right column - empty space
-        pn.Spacer(width=330)
+        pn.Spacer(width=280)  # Reduced from 330
     ),
-    # Add more vertical space before outputs
-    pn.Spacer(height=70),  # Increased from 50px to 70px to move graphs down more
-    # Third section - Output graphs (moved further down)
+    # FIXED: Significantly increased vertical space before outputs to prevent overlap
+    pn.Spacer(height=150),  # Increased from 70px to 150px to ensure no overlap with Input Scaler tabs
+    # Third section - Output graphs (moved much further down)
     pn.Row(
         pn.Spacer(width=50),  # Left margin
         pn.Column(

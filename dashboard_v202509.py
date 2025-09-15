@@ -700,9 +700,9 @@ pn.extension(
 
 /* Bigger blue Download buttons (FileDownload renders as <a> or <button>) */
 .custom-download a.bk-btn, .custom-download button.bk-btn, .custom-download .bk-btn {
-  font-size: 24px !important;
-  font-weight: 700 !important;
-  height: 64px !important;
+  font-size: 20px !important;
+  font-weight: 600 !important;
+  height: 40px !important;
   padding: 8px 18px !important;
 }
 """ ]

@@ -558,17 +558,10 @@ status_text = pn.pane.Markdown("**Ready**", width=180)
 
 # Compute button with LARGER FONT SIZE
 compute_btn = pn.widgets.Button(
-    name='Compute', 
-    button_type='success', 
-    width=180, 
-    height=50,  # Increased height
-    margin=(10, 10, 10, 10),
-    stylesheets=["""
-    .bk-btn {
-        font-size: 24px !important;
-        font-weight: bold !important;
-    }
-    """]
+    name='Compute',
+    button_type='success',
+    width=200,
+    css_classes=["custom-compute"]
 )
 
 def compute_current(event):
@@ -605,26 +598,14 @@ output_download = pn.widgets.FileDownload(
     filename='ann_outputs.csv',
     label='Download Output Data',
     button_type='primary',
-    height=50,  # Increased height
-    stylesheets=["""
-    .bk-btn {
-        font-size: 24px !important;
-        font-weight: bold !important;
-    }
-    """]
+    css_classes=["custom-download"]
 )
 input_download = pn.widgets.FileDownload(
     file='ann_inputs.csv',
     filename='ann_inputs.csv',
     label='Download Input Data',
     button_type='primary',
-    height=50,  # Increased height
-    stylesheets=["""
-    .bk-btn {
-        font-size: 24px !important;
-        font-weight: bold !important;
-    }
-    """]
+    css_classes=["custom-download"]
 )
 input_upload = pn.widgets.FileInput(accept='.csv')
 
@@ -704,7 +685,28 @@ scale_sac_greens_ec = pn.bind(scale_inputs, scale_df=scale_df,
                               **sac_greens_ec.kwargs)
 
 # Dashboard Layout
-pn.extension(loading_spinner='dots', loading_color='silver', throttled=True)
+pn.extension(
+    loading_spinner='dots',
+    loading_color='silver',
+    throttled=True,
+    raw_css=[ """
+/* Bigger green Compute button */
+.custom-compute button.bk-btn, .custom-compute .bk-btn {
+  font-size: 26px !important;
+  font-weight: 600 !important;
+  height: 70px !important;
+  padding: 10px 20px !important;
+}
+
+/* Bigger blue Download buttons (FileDownload renders as <a> or <button>) */
+.custom-download a.bk-btn, .custom-download button.bk-btn, .custom-download .bk-btn {
+  font-size: 24px !important;
+  font-weight: 700 !important;
+  height: 64px !important;
+  padding: 8px 18px !important;
+}
+""" ]
+)
 pn.param.ParamMethod.loading_indicator = True
 
 # Main dashboard - Single page layout with new workflow order
